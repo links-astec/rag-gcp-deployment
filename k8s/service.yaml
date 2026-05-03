@@ -1,0 +1,93 @@
+# ── Namespace ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rag
+  labels:
+    app: rag
+
+---
+# ── Service ───────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-api-service
+  namespace: rag
+  annotations:
+    # GCP internal load balancer — only reachable inside the VPC
+    cloud.google.com/load-balancer-type: "Internal"
+spec:
+  type: LoadBalancer
+  selector:
+    app: rag-api
+  ports:
+    - name:       http
+      port:       80
+      targetPort: 8000
+      protocol:   TCP
+
+---
+# ── Horizontal Pod Autoscaler ─────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: rag-api-hpa
+  namespace: rag
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: rag-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type:          Pods
+          value:         2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300    # slow scale-down to avoid thrashing
+
+---
+# ── ConfigMap ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rag-config
+  namespace: rag
+data:
+  GROQ_MODEL:               "llama3-8b-8192"
+  EMBED_MODEL:              "BAAI/bge-small-en-v1.5"
+  RERANKER_MODEL:           "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  VECTOR_WEIGHT:            "0.7"
+  BM25_WEIGHT:              "0.3"
+  RERANK_FETCH_K:           "20"
+  RERANK_TOP_N:             "5"
+  CLOUD_SQL_CONNECTION_NAME: "ragproject-495216:us-central1:rag-postgres"   # replace at deploy time
+
+---
+# ── ServiceAccount (Workload Identity) ───────────────────────────────────────
+# Allows the pod to authenticate to Cloud SQL without a password
+# Linked to a GCP Service Account via Workload Identity annotation
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rag-api-sa
+  namespace: rag
+  annotations:
+    iam.gke.io/gcp-service-account: rag-api@ragproject-495216.iam.gserviceaccount.com
