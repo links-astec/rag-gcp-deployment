@@ -1,0 +1,140 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-api
+  namespace: rag
+  labels:
+    app: rag-api
+    iteration: "5"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rag-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0        # zero-downtime deploys
+  template:
+    metadata:
+      labels:
+        app: rag-api
+    spec:
+      serviceAccountName: rag-api-sa
+
+      # Cloud SQL Auth Proxy sidecar — handles IAM-based auth to Cloud SQL
+      # No password in env vars; the proxy authenticates via Workload Identity
+      containers:
+
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            - "$(CLOUD_SQL_CONNECTION_NAME)"   # injected from ConfigMap
+          env:
+            - name: CLOUD_SQL_CONNECTION_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: rag-config
+                  key: CLOUD_SQL_CONNECTION_NAME
+          resources:
+            requests:
+              cpu:    100m
+              memory: 128Mi
+            limits:
+              cpu:    200m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+
+        - name: rag-api
+          image: us-central1-docker.pkg.dev/ragproject-495216/rag-repo/rag-api:latest
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            # DB — proxy listens on localhost:5432, no password needed
+            - name: PGVECTOR_CONNECTION_STRING
+              value: "postgresql+psycopg://rag@localhost:5432/rag_db"
+
+            # Groq API key from Secret Manager via k8s secret
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rag-secrets
+                  key: GROQ_API_KEY
+
+            # Non-secret config from ConfigMap
+            - name: GROQ_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: rag-config
+                  key: GROQ_MODEL
+            - name: EMBED_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: rag-config
+                  key: EMBED_MODEL
+            - name: RERANKER_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: rag-config
+                  key: RERANKER_MODEL
+            - name: VECTOR_WEIGHT
+              valueFrom:
+                configMapKeyRef:
+                  name: rag-config
+                  key: VECTOR_WEIGHT
+            - name: BM25_WEIGHT
+              valueFrom:
+                configMapKeyRef:
+                  name: rag-config
+                  key: BM25_WEIGHT
+            - name: RERANK_FETCH_K
+              valueFrom:
+                configMapKeyRef:
+                  name: rag-config
+                  key: RERANK_FETCH_K
+            - name: RERANK_TOP_N
+              valueFrom:
+                configMapKeyRef:
+                  name: rag-config
+                  key: RERANK_TOP_N
+
+          resources:
+            requests:
+              cpu:    500m
+              memory: 1Gi
+            limits:
+              cpu:    2000m
+              memory: 3Gi
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60    # allow model loading
+            periodSeconds: 10
+            failureThreshold: 6
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            failureThreshold: 3
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # HuggingFace cache needs write access
+
+      # HuggingFace model cache persisted across pod restarts
+      volumes:
+        - name: hf-cache
+          emptyDir: {}
